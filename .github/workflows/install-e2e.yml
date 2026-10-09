@@ -72,6 +72,11 @@ jobs:
           fetch-tags: true
           sparse-checkout: scripts/sandbox/pick-release-tags.sh
           sparse-checkout-cone-mode: false
+      # Forks do not inherit the upstream repository's release tags. Fetch
+      # those tags explicitly so scheduled E2E runs can select real releases.
+      - name: Fetch upstream release tags
+        if: github.repository != 'NousResearch/hermes-agent'
+        run: git fetch --force --tags https://github.com/NousResearch/hermes-agent.git 'refs/tags/*:refs/tags/*'
       - id: pick
         run: |
           set -euo pipefail
