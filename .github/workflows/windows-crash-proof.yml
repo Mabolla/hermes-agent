@@ -1,0 +1,42 @@
+name: Windows crash reporting proof
+
+on:
+  push:
+    branches:
+      - ci/windows-crash-proof-137227
+
+permissions:
+  contents: read
+
+jobs:
+  windows-proof:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the exact PR commit
+        uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          ref: 29ac68f9efebef385dc7ce26a3a8c0ccf3b4c1f5
+          persist-credentials: false
+
+      - name: Prepare pinned Python and test environment
+        id: pm
+        uses: ./.github/actions/setup-pm
+        with:
+          toolchain: python
+          extras: '[]'
+          test-environment: 'true'
+
+      - name: Prove native Windows status and exact source
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "29ac68f9efebef385dc7ce26a3a8c0ccf3b4c1f5"
+          python -c "import sys, platform; assert sys.platform == 'win32'; print(sys.version); print(platform.platform()); print(platform.machine())"
+          git status --short
+
+      - name: Run exit reporting contracts and both native Windows children
+        shell: bash
+        env:
+          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
+        run: |
+          scripts/run_tests.sh tests/scripts/test_run_tests_parallel_windows_crashes.py --file-retries 0 -j 1 -q --junitxml=windows-crash-proof.xml
