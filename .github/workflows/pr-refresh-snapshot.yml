@@ -1,0 +1,25 @@
+name: PR refresh source snapshot
+on:
+  push:
+    branches: [ci/pr-refresh-oct15]
+    paths: [.github/workflows/pr-refresh-snapshot.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          repository: NousResearch/hermes-agent
+          ref: 7520c4e8b3791f081b2c26d5ea9a0c07b0363401
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Archive public source and pinned Git objects
+        run: tar --exclude=.git/hooks -czf "$RUNNER_TEMP/hermes-source.tgz" .
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hermes-source-7520c4e8
+          path: ${{ runner.temp }}/hermes-source.tgz
+          retention-days: 1
