@@ -47,3 +47,5 @@ jobs:
           name: acp-daemon-${{ matrix.pr }}
           path: ${{ runner.temp }}/daemon-tests.log
           retention-days: 7
+
+# Native Linux proof after re-enabling fork Actions.
