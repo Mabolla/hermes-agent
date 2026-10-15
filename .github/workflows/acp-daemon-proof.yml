@@ -1,0 +1,49 @@
+name: ACP daemon proof
+on:
+  push:
+    branches: [ci/acp-daemon-proof-oct15]
+    paths: [.github/workflows/acp-daemon-proof.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  daemon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: 137390
+            sha: 045cc10340dd4e3ff1364de7c38d2713d0fbef5d
+          - pr: 137380
+            sha: 7e94d5f8403c56396e3b24a4c37d7efbd420a204
+          - pr: 137950
+            sha: c29e0764f223146d6ce97c8a70d4b8fb8f054a12
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7.0.1
+        with:
+          ref: ${{ matrix.sha }}
+          persist-credentials: false
+      - name: Record exact source and socket support
+        run: |
+          git rev-parse HEAD
+          python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.bind("/tmp/hermes-proof.sock"); s.close()'
+      - uses: ./.github/actions/setup-pm
+        id: pm
+        with:
+          toolchain: python
+          extras: '["acp"]'
+          test-environment: 'true'
+      - name: Run ACP suite including real daemon and stdio clients
+        env:
+          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
+        run: |
+          set -o pipefail
+          scripts/run_tests.sh tests/acp_adapter/ tests/gateway/test_managed_worker_construct.py tests/gateway/test_managed_worker_tool_events.py tests/gateway/test_local_viewer_events_turn.py tests/gateway/test_local_viewer_status_notice.py --file-retries 0 -j 4 2>&1 | tee "$RUNNER_TEMP/daemon-tests.log"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: acp-daemon-${{ matrix.pr }}
+          path: ${{ runner.temp }}/daemon-tests.log
+          retention-days: 7
