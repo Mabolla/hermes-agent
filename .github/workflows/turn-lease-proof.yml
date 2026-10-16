@@ -13,10 +13,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: unchanged-main
-            sha: 848fc0ad8be766b9dc10fe42bd80b5fc2d45d95c
+          - name: existing-pr
+            sha: 3ff682f119c0733c38c1b5745edbba3745f943d4
           - name: isolated-lease-writer
-            sha: 2f9c616cef089e9131b5d358406a6abba821b7de
+            sha: b1f89f78c759e1c8ac40478b8d6c1cc45770d5f4
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
@@ -36,9 +36,39 @@ jobs:
         run: |
           set -o pipefail
           scripts/run_tests.sh tests/hermes_state/ tests/agent/test_turn_facade_lease.py tests/agent/test_cross_process_turn_lease.py --file-retries 0 -j 4 -q 2>&1 | tee "$RUNNER_TEMP/state-tests.log"
+      - name: Blocking checks on the follow-up
+        if: matrix.name == 'isolated-lease-writer'
+        run: python3 scripts/check --base 3ff682f119c0733c38c1b5745edbba3745f943d4
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        if: matrix.name == 'existing-pr'
+        with:
+          ref: b1f89f78c759e1c8ac40478b8d6c1cc45770d5f4
+          path: .proof-source
+          persist-credentials: false
+      - name: Prove missing-path regression fails on the existing PR
+        if: matrix.name == 'existing-pr'
+        env:
+          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
+        run: |
+          cp .proof-source/tests/hermes_state/test_turn_lease_writer_isolation.py tests/hermes_state/
+          rm -rf .proof-source
+          set +e
+          set -o pipefail
+          scripts/run_tests.sh tests/hermes_state/test_turn_lease_writer_isolation.py --file-retries 0 -j 1 -k 'upkeep_never_opens_a_replacement_database and refresh' -q 2>&1 | tee "$RUNNER_TEMP/red-regression.log"
+          result=$?
+          set -e
+          test "$result" -eq 1
+          grep -q '1 failed' "$RUNNER_TEMP/red-regression.log"
+          grep -q 'no such table: sessions' "$RUNNER_TEMP/red-regression.log"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: turn-lease-${{ matrix.name }}
+          path: ${{ runner.temp }}/*regression.log\n          # Full suite output is uploaded separately below.
+          retention-days: 7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: state-suite-${{ matrix.name }}
           path: ${{ runner.temp }}/state-tests.log
           retention-days: 7
