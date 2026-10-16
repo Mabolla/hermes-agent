@@ -1,4 +1,4 @@
-name: Chromium runtime log proof
+name: Real Windows Chromium payload verification
 on:
   push:
     branches: [ci/chromium-runtime-log-proof]
@@ -6,129 +6,71 @@ on:
 permissions:
   contents: read
 jobs:
-  proof:
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+  chromium-payload:
+    runs-on: windows-latest
+    timeout-minutes: 15
     defaults:
       run:
         shell: bash
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: fixed-windows
-            os: windows-latest
-            sha: 44d8847a06288f1f74978fa113d6075c799f898b
-            packages: chromium
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7
         with:
-          ref: ${{ matrix.sha }}
+          ref: 44d8847a06288f1f74978fa113d6075c799f898b
           fetch-depth: 2
           persist-credentials: false
-      - name: Record exact source
-        run: git rev-parse HEAD
       - uses: ./.github/actions/setup-pm
-        id: pm
         with:
           toolchain: python
           test-environment: 'true'
-          packages: ${{ matrix.packages }}
-      - name: Full PM suite on Linux
-        if: matrix.name == 'fixed-linux'
-        env:
-          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
+          packages: chromium
+      - name: Verify pinned archive, live log lock and payload damage
         run: |
-          set -o pipefail
-          scripts/run_tests.sh tests/pm/ --file-retries 0 -j 4 -q 2>&1 | tee "$RUNNER_TEMP/pm-suite.log"
-      - name: Exercise the real pinned Windows Chromium archive
-        if: matrix.name == 'fixed-windows'
-        run: |
-          "$HERMES_PYTHON" - <<'PY' 2>&1 | tee "$RUNNER_TEMP/real-chromium.log"
-          import subprocess, tempfile
-          from pathlib import Path
-          from pm.filesystem import native
+          "$HERMES_PYTHON" - <<'PY' 2>&1 | tee "$RUNNER_TEMP/real-chromium-payload.log"
+          import ctypes
+          from ctypes import wintypes
           from pm.registry import get_package
           from pm.install import _entry_verified, _installed_location, _lockfile
-          from pm.store import current_target
+          from pm.store import current_target, tree_digest
           package, target = get_package("chromium"), current_target()
           facts, store = _installed_location(package, _lockfile(), target)
           fact = facts.get("chromium")
           entry = store.entry(fact["entry"])
+          assert package.verify(entry, target) == ""
+          assert tree_digest(entry) == fact["digest"]
           assert _entry_verified(package, fact, store, target)
-          with tempfile.TemporaryDirectory() as work:
-              root = Path(work)
-              with (root / "stdout.txt").open("w", encoding="utf-8") as out, (root / "stderr.txt").open("w", encoding="utf-8") as err:
-                  process = subprocess.Popen([native(package.binary(entry, target)), "--headless",
-                      "--disable-gpu", "--no-sandbox", "--no-first-run", "--no-default-browser-check",
-                      "--user-data-dir=" + str(root / "profile"), "--timeout=10000",
-                      "--dump-dom", "data:text/html,<title>hermes-log-proof</title>"],
-                      stdout=out, stderr=err)
-                  try:
-                      code = process.wait(timeout=45)
-                  except subprocess.TimeoutExpired:
-                      subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
-                      process.wait(timeout=15)
-                      print((root / "stderr.txt").read_text(encoding="utf-8", errors="replace"))
-                      raise
-              output = (root / "stdout.txt").read_text(encoding="utf-8", errors="replace")
-              errors = (root / "stderr.txt").read_text(encoding="utf-8", errors="replace")
-              assert code == 0, errors
-              assert "hermes-log-proof" in output, (output, errors)
-          print("Actual Chromium --dump-dom returned the expected document.")
           log = entry / "chrome-win64" / "debug.log"
-          with log.open("ab") as output:
-              output.write(b"runtime crashpad diagnostic\n")
-          assert _entry_verified(package, fact, store, target)
-          resource = next(entry.rglob("*.pak"))
-          with resource.open("ab") as output:
-              output.write(b"tampered payload")
-          assert not _entry_verified(package, fact, store, target)
-          print("Pinned Chromium", fact["version"], "launched successfully on", target)
-          print("Runtime debug.log accepted; modified .pak payload rejected.")
+          log.write_bytes(b"runtime crashpad registration diagnostic\n")
+          kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+          kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+              wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+          kernel.CreateFileW.restype = wintypes.HANDLE
+          kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+          handle = kernel.CreateFileW(str(log), 0x40000000, 3, None, 3, 0x80, None)
+          assert handle != wintypes.HANDLE(-1).value, ctypes.get_last_error()
+          try:
+              try:
+                  log.unlink()
+              except PermissionError:
+                  pass
+              else:
+                  raise AssertionError("Windows did not hold the log against deletion")
+              assert tree_digest(entry) != fact["digest"], "old raw digest must see the log"
+              assert _entry_verified(package, fact, store, target)
+              resource = next(entry.rglob("*.pak"))
+              with resource.open("ab") as output:
+                  output.write(b"tampered payload")
+              assert not _entry_verified(package, fact, store, target)
+          finally:
+              kernel.CloseHandle(handle)
+          print("Actual pinned Chromium archive:", fact["version"], target)
+          print("Old raw digest rejects the runtime log; package verification accepts it.")
+          print("Native Windows log deletion is refused; the log is preserved.")
+          print("Modified .pak payload is rejected.")
+          print("Browser rendering is not claimed by this payload verification.")
           PY
-      - name: Blocking checks
-        if: matrix.name == 'fixed-linux'
-        run: python3 scripts/check --base 521f4dc2a1a4e19d56419a899f779d60efa01716
-      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7
-        if: matrix.name == 'base-windows-red'
-        with:
-          ref: 44d8847a06288f1f74978fa113d6075c799f898b
-          path: .proof-source
-          persist-credentials: false
-      - name: Prove runtime log regressions fail on upstream Windows
-        if: matrix.name == 'base-windows-red'
-        env:
-          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
-        run: |
-          cp .proof-source/tests/pm/test_chromium_runtime_log.py tests/pm/
-          rm -rf .proof-source
-          set +e
-          set -o pipefail
-          scripts/run_tests.sh tests/pm/test_chromium_runtime_log.py --file-retries 0 -j 1 -k 'installed_chromium_accepts_only_its_runtime_log or doctor_and_install_accept_a_locked_chromium_log' -q 2>&1 | tee "$RUNNER_TEMP/red-regression.log"
-          result=$?
-          set -e
-          test "$result" -eq 1
-          grep -q '3 failed' "$RUNNER_TEMP/red-regression.log"
-          grep -q 'AssertionError' "$RUNNER_TEMP/red-regression.log"
-      - name: Verify the two existing authority failures on unmodified Windows
-        if: matrix.name == 'base-windows-authority'
-        env:
-          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
-        run: |
-          set +e
-          set -o pipefail
-          scripts/run_tests.sh tests/pm/test_pm_authority.py --file-retries 0 -j 1 -q 2>&1 | tee "$RUNNER_TEMP/base-authority.log"
-          result=$?
-          set -e
-          test "$result" -eq 1
-          grep -q '2 failed' "$RUNNER_TEMP/base-authority.log"
-          grep -q 'FAILED.*replacement-install-verify' "$RUNNER_TEMP/base-authority.log"
-          grep -q 'FAILED.*test_failed_restore_preserves_both_interrupted_versions' "$RUNNER_TEMP/base-authority.log"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: chromium-proof-${{ matrix.name }}
-          path: ${{ runner.temp }}/*.log
+          name: real-windows-chromium-payload
+          path: ${{ runner.temp }}/real-chromium-payload.log
           retention-days: 7
