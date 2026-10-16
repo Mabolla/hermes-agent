@@ -1,0 +1,120 @@
+name: Chromium runtime log proof
+on:
+  push:
+    branches: [ci/chromium-runtime-log-proof]
+    paths: [.github/workflows/chromium-runtime-log-proof.yml]
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: fixed-linux
+            os: ubuntu-latest
+            sha: 44d8847a06288f1f74978fa113d6075c799f898b
+            packages: ''
+          - name: fixed-windows
+            os: windows-latest
+            sha: 44d8847a06288f1f74978fa113d6075c799f898b
+            packages: chromium
+          - name: base-windows-red
+            os: windows-latest
+            sha: 521f4dc2a1a4e19d56419a899f779d60efa01716
+            packages: ''
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Record exact source
+        run: git rev-parse HEAD
+      - uses: ./.github/actions/setup-pm
+        id: pm
+        with:
+          toolchain: python
+          test-environment: 'true'
+          packages: ${{ matrix.packages }}
+      - name: Full PM suite on Linux
+        if: matrix.name == 'fixed-linux'
+        env:
+          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
+        run: |
+          set -o pipefail
+          scripts/run_tests.sh tests/pm/ --file-retries 0 -j 4 -q 2>&1 | tee "$RUNNER_TEMP/pm-suite.log"
+      - name: PM integrity suite on native Windows
+        if: matrix.name == 'fixed-windows'
+        env:
+          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
+        run: |
+          set -o pipefail
+          scripts/run_tests.sh tests/pm/test_chromium_runtime_log.py tests/pm/test_pm_core.py tests/pm/test_pm_authority.py tests/pm/test_tree_digest_links.py tests/pm/test_build_operations.py --file-retries 0 -j 4 -q 2>&1 | tee "$RUNNER_TEMP/pm-suite.log"
+      - name: Exercise the real pinned Windows Chromium archive
+        if: matrix.name == 'fixed-windows'
+        run: |
+          "$HERMES_PYTHON" - <<'PY' 2>&1 | tee "$RUNNER_TEMP/real-chromium.log"
+          import subprocess, tempfile
+          from pathlib import Path
+          from pm.registry import get_package
+          from pm.install import _entry_verified, _installed_location, _lockfile
+          from pm.store import current_target
+          package, target = get_package("chromium"), current_target()
+          facts, store = _installed_location(package, _lockfile(), target)
+          fact = facts.get("chromium")
+          entry = store.entry(fact["entry"])
+          assert _entry_verified(package, fact, store, target)
+          with tempfile.TemporaryDirectory() as profile:
+              result = subprocess.run([str(package.binary(entry, target)), "--headless",
+                  "--no-first-run", "--no-default-browser-check", "--user-data-dir=" + profile,
+                  "--dump-dom", "data:text/html,<title>hermes-log-proof</title>"],
+                  capture_output=True, text=True, timeout=90)
+              assert result.returncode == 0, result.stderr
+              assert "hermes-log-proof" in result.stdout, result.stdout
+          log = entry / "chrome-win64" / "debug.log"
+          with log.open("ab") as output:
+              output.write(b"runtime crashpad diagnostic\n")
+          assert _entry_verified(package, fact, store, target)
+          resource = next(entry.rglob("*.pak"))
+          with resource.open("ab") as output:
+              output.write(b"tampered payload")
+          assert not _entry_verified(package, fact, store, target)
+          print("Pinned Chromium", fact["version"], "launched successfully on", target)
+          print("Runtime debug.log accepted; modified .pak payload rejected.")
+          PY
+      - name: Blocking checks
+        if: matrix.name == 'fixed-linux'
+        run: python3 scripts/check --base 521f4dc2a1a4e19d56419a899f779d60efa01716
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7
+        if: matrix.name == 'base-windows-red'
+        with:
+          ref: 44d8847a06288f1f74978fa113d6075c799f898b
+          path: .proof-source
+          persist-credentials: false
+      - name: Prove runtime log regressions fail on upstream Windows
+        if: matrix.name == 'base-windows-red'
+        env:
+          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
+        run: |
+          cp .proof-source/tests/pm/test_chromium_runtime_log.py tests/pm/
+          rm -rf .proof-source
+          set +e
+          set -o pipefail
+          scripts/run_tests.sh tests/pm/test_chromium_runtime_log.py --file-retries 0 -j 1 -k 'installed_chromium_accepts_only_its_runtime_log or doctor_and_install_accept_a_locked_chromium_log' -q 2>&1 | tee "$RUNNER_TEMP/red-regression.log"
+          result=$?
+          set -e
+          test "$result" -eq 1
+          grep -q '3 failed' "$RUNNER_TEMP/red-regression.log"
+          grep -q 'AssertionError' "$RUNNER_TEMP/red-regression.log"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: chromium-proof-${{ matrix.name }}
+          path: ${{ runner.temp }}/*.log
+          retention-days: 7
