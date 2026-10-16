@@ -1,0 +1,44 @@
+name: Turn lease contention proof
+on:
+  push:
+    branches: [ci/turn-lease-proof-oct16]
+    paths: [.github/workflows/turn-lease-proof.yml]
+permissions:
+  contents: read
+jobs:
+  state:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: unchanged-main
+            sha: 848fc0ad8be766b9dc10fe42bd80b5fc2d45d95c
+          - name: isolated-lease-writer
+            sha: 2f9c616cef089e9131b5d358406a6abba821b7de
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          ref: ${{ matrix.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Record exact source
+        run: git rev-parse HEAD
+      - uses: ./.github/actions/setup-pm
+        id: pm
+        with:
+          toolchain: python
+          test-environment: 'true'
+      - name: State and turn lease regression suite
+        env:
+          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
+        run: |
+          set -o pipefail
+          scripts/run_tests.sh tests/hermes_state/ tests/agent/test_turn_facade_lease.py tests/agent/test_cross_process_turn_lease.py --file-retries 0 -j 4 -q 2>&1 | tee "$RUNNER_TEMP/state-tests.log"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: turn-lease-${{ matrix.name }}
+          path: ${{ runner.temp }}/state-tests.log
+          retention-days: 7
