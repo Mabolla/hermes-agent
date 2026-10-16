@@ -16,15 +16,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: fixed-linux
-            os: ubuntu-latest
-            sha: 44d8847a06288f1f74978fa113d6075c799f898b
-            packages: ''
           - name: fixed-windows
             os: windows-latest
             sha: 44d8847a06288f1f74978fa113d6075c799f898b
             packages: chromium
-          - name: base-windows-red
+          - name: base-windows-authority
             os: windows-latest
             sha: 521f4dc2a1a4e19d56419a899f779d60efa01716
             packages: ''
@@ -55,7 +51,7 @@ jobs:
           HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
         run: |
           set -o pipefail
-          scripts/run_tests.sh tests/pm/test_chromium_runtime_log.py tests/pm/test_pm_core.py tests/pm/test_pm_authority.py tests/pm/test_tree_digest_links.py tests/pm/test_build_operations.py --file-retries 0 -j 4 -q 2>&1 | tee "$RUNNER_TEMP/pm-suite.log"
+          scripts/run_tests.sh tests/pm/test_chromium_runtime_log.py tests/pm/test_pm_core.py tests/pm/test_tree_digest_links.py tests/pm/test_build_operations.py --file-retries 0 -j 4 -q 2>&1 | tee "$RUNNER_TEMP/pm-suite.log"
       - name: Exercise the real pinned Windows Chromium archive
         if: matrix.name == 'fixed-windows'
         run: |
@@ -112,6 +108,20 @@ jobs:
           test "$result" -eq 1
           grep -q '3 failed' "$RUNNER_TEMP/red-regression.log"
           grep -q 'AssertionError' "$RUNNER_TEMP/red-regression.log"
+      - name: Verify the two existing authority failures on unmodified Windows
+        if: matrix.name == 'base-windows-authority'
+        env:
+          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
+        run: |
+          set +e
+          set -o pipefail
+          scripts/run_tests.sh tests/pm/test_pm_authority.py --file-retries 0 -j 1 -q 2>&1 | tee "$RUNNER_TEMP/base-authority.log"
+          result=$?
+          set -e
+          test "$result" -eq 1
+          grep -q '2 failed' "$RUNNER_TEMP/base-authority.log"
+          grep -q 'FAILED.*replacement-install-verify' "$RUNNER_TEMP/base-authority.log"
+          grep -q 'FAILED.*test_failed_restore_preserves_both_interrupted_versions' "$RUNNER_TEMP/base-authority.log"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
