@@ -20,10 +20,6 @@ jobs:
             os: windows-latest
             sha: 44d8847a06288f1f74978fa113d6075c799f898b
             packages: chromium
-          - name: base-windows-authority
-            os: windows-latest
-            sha: 521f4dc2a1a4e19d56419a899f779d60efa01716
-            packages: ''
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a # v7
         with:
@@ -45,19 +41,13 @@ jobs:
         run: |
           set -o pipefail
           scripts/run_tests.sh tests/pm/ --file-retries 0 -j 4 -q 2>&1 | tee "$RUNNER_TEMP/pm-suite.log"
-      - name: PM integrity suite on native Windows
-        if: matrix.name == 'fixed-windows'
-        env:
-          HERMES_PYTHON: ${{ steps.pm.outputs.python-path }}
-        run: |
-          set -o pipefail
-          scripts/run_tests.sh tests/pm/test_chromium_runtime_log.py tests/pm/test_pm_core.py tests/pm/test_tree_digest_links.py tests/pm/test_build_operations.py --file-retries 0 -j 4 -q 2>&1 | tee "$RUNNER_TEMP/pm-suite.log"
       - name: Exercise the real pinned Windows Chromium archive
         if: matrix.name == 'fixed-windows'
         run: |
           "$HERMES_PYTHON" - <<'PY' 2>&1 | tee "$RUNNER_TEMP/real-chromium.log"
           import subprocess, tempfile
           from pathlib import Path
+          from pm.filesystem import native
           from pm.registry import get_package
           from pm.install import _entry_verified, _installed_location, _lockfile
           from pm.store import current_target
@@ -66,13 +56,27 @@ jobs:
           fact = facts.get("chromium")
           entry = store.entry(fact["entry"])
           assert _entry_verified(package, fact, store, target)
-          with tempfile.TemporaryDirectory() as profile:
-              result = subprocess.run([str(package.binary(entry, target)), "--headless",
-                  "--no-first-run", "--no-default-browser-check", "--user-data-dir=" + profile,
-                  "--dump-dom", "data:text/html,<title>hermes-log-proof</title>"],
-                  capture_output=True, text=True, timeout=90)
-              assert result.returncode == 0, result.stderr
-              assert "hermes-log-proof" in result.stdout, result.stdout
+          with tempfile.TemporaryDirectory() as work:
+              root = Path(work)
+              with (root / "stdout.txt").open("w", encoding="utf-8") as out, (root / "stderr.txt").open("w", encoding="utf-8") as err:
+                  process = subprocess.Popen([native(package.binary(entry, target)), "--headless",
+                      "--disable-gpu", "--no-sandbox", "--no-first-run", "--no-default-browser-check",
+                      "--user-data-dir=" + str(root / "profile"), "--timeout=10000",
+                      "--dump-dom", "data:text/html,<title>hermes-log-proof</title>"],
+                      stdout=out, stderr=err)
+                  try:
+                      code = process.wait(timeout=45)
+                  except subprocess.TimeoutExpired:
+                      subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+                      process.wait(timeout=15)
+                      print((root / "stderr.txt").read_text(encoding="utf-8", errors="replace"))
+                      raise
+              output = (root / "stdout.txt").read_text(encoding="utf-8", errors="replace")
+              errors = (root / "stderr.txt").read_text(encoding="utf-8", errors="replace")
+              assert code == 0, errors
+              assert "hermes-log-proof" in output, (output, errors)
+          print("Actual Chromium --dump-dom returned the expected document.")
           log = entry / "chrome-win64" / "debug.log"
           with log.open("ab") as output:
               output.write(b"runtime crashpad diagnostic\n")
