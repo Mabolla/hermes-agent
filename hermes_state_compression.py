@@ -723,6 +723,7 @@ class SessionCompressionMixin:
         the write-lock wait, so a caller timestamp taken before this call never exceeds it."""
         if not session_id or not holder:
             return False
+        from hermes_state_turn_lease_writer import execute_lease_write
         expires_at = time.time() + max(0.1, float(ttl_seconds))
         def _do(conn):
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
@@ -730,18 +731,19 @@ class SessionCompressionMixin:
                 "UPDATE session_turn_leases SET expires_at = ? "
                 "WHERE conversation_id = ? AND holder = ?", (expires_at, conversation_id, holder),
             ).rowcount > 0
-        return bool(self._execute_write(_do, patience_s=patience_s))
+        return bool(execute_lease_write(self, _do, patience_s=patience_s))
 
     def release_session_turn_lease(self, session_id: str, holder: str) -> None:
         """Release a turn lease iff ``holder`` still owns it; idempotent."""
         if not session_id or not holder:
             return
+        from hermes_state_turn_lease_writer import execute_lease_write
         def _do(conn):
             conversation_id = self._session_turn_lease_key_on_conn(conn, session_id)
             conn.execute(
                 "DELETE FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
                 (conversation_id, holder))
-        self._execute_write(_do)
+        execute_lease_write(self, _do)
 
     def get_compression_lock_holder(self, session_id: str) -> Optional[str]:
         """Current (non-expired) holder for ``session_id``, or None. Diagnostic only."""
